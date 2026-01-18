@@ -1,4 +1,7 @@
 import Foundation
+#if os(Windows)
+import WinSDK // we need to make raw WinSDK calls
+#endif
 
 /// SerialPort acts as the handle to manipulate and read the serial input and output.
 public class SerialPort {
@@ -7,6 +10,10 @@ public class SerialPort {
 	var path: String
 	/// Storage for the file descriptor of the path. Probably don't edit this. (I should probably make private, but I don't know if there's anything relying on it)
 	var fileDescriptor: Int32?
+	
+	#if os(Windows)
+    private var handle: HANDLE? // Native Windows com port handle
+    #endif
 
 	private var isOpen: Bool { fileDescriptor != nil }
 
@@ -30,6 +37,33 @@ public class SerialPort {
 		guard !path.isEmpty else { throw PortError.invalidPath }
 		guard isOpen == false else { throw PortError.instanceAlreadyOpen }
 
+		#if os(Windows)
+			// 1. Format path (e.g., COM3 -> \\.\COM3)
+			let formattedPath = path.hasPrefix("\\\\.\\") ? path : "\\\\.\\" + path
+			
+			// 2. Open using Win32
+			let h = CreateFileA(
+				formattedPath,
+				UInt32(GENERIC_READ) | UInt32(GENERIC_WRITE),
+				0,    // Exclusive access
+				nil,  // Security
+				UInt32(OPEN_EXISTING),
+				0,    // No overlapped I/O for now (simpler porting)
+				nil
+			)
+
+			if h == INVALID_HANDLE_VALUE {
+				throw PortError.failedToOpen
+			}
+			self.handle = h
+
+			// 3. Convert HANDLE to File Descriptor so existing read/write code works
+			// _O_RDWR (2) and _O_BINARY (32768)
+			self.fileDescriptor = _open_osfhandle(Int(bitPattern: h), 0)
+		
+		#else
+		// UNIX platform, use open()
+
 		let readWriteParam: Int32
 
 		switch portMode {
@@ -51,6 +85,7 @@ public class SerialPort {
 		if fileDescriptor == PortError.failedToOpen.rawValue {
 			throw PortError.failedToOpen
 		}
+		#endif // UNIX version
 
 		guard
 			portMode.receive,
@@ -65,7 +100,15 @@ public class SerialPort {
 				let bufferSize = 1024
 				let buffer = UnsafeMutableRawPointer
 					.allocate(byteCount: bufferSize, alignment: 8)
-				let bytesRead = read(fileDescriptor, buffer, bufferSize)
+				
+				#if os(Windows)
+					// Windows read() takes UInt32 size and returns Int32
+					let bytesRead = Int(_read(fileDescriptor, buffer, UInt32(bufferSize)))
+				#else
+					// POSIX read() takes Int/size_t and returns Int/ssize_t
+					let bytesRead = read(fileDescriptor, buffer, bufferSize)
+				#endif
+				
 				guard bytesRead > 0 else { return }
 				let bytes = Data(bytes: buffer, count: bytesRead)
 				continuation.yield(bytes)
@@ -136,7 +179,42 @@ public class SerialPort {
 			throw PortError.mustBeOpen
 		}
 
-		// Set up the control structure
+		#if os(Windows)
+			// Use windows.h Device Control Block (DCB)
+			var dcb = DCB()
+			dcb.DCBlength = UInt32(MemoryLayout<DCB>.size)
+			if !GetCommState(handle, &dcb) { throw PortError.invalidPort }
+
+			// Set basic parameters
+			dcb.BaudRate = UInt32(baudRateSetting.receiveRate.speedValue)
+			dcb.ByteSize = dataBitsSize.flagValue
+			dcb.Parity = parityType.parityValue
+			dcb.StopBits = sendTwoStopBits ? 2 : 0 // 0=1bit, 2=2bits
+			
+			dcb.fBinary = 1 // Must be 1 on Windows
+			dcb.fParity = (parityType == .none) ? 0 : 1
+
+			// Flow Control
+			if useHardwareFlowControl {
+				dcb.fOutxCtsFlow = 1
+				dcb.fRtsControl = 1 // RTS_CONTROL_HANDSHAKE
+			} else {
+				dcb.fOutxCtsFlow = 0
+				dcb.fRtsControl = 1 // RTS_CONTROL_ENABLE
+			}
+
+			if !SetCommState(handle, &dcb) { throw PortError.invalidPort }
+
+			// Timeouts (Mapping VMIN/VTIME)
+			var timeouts = COMMTIMEOUTS()
+			// This setup mimics "Non-blocking" or "Wait for bytes"
+			timeouts.ReadIntervalTimeout = (timeout == 0) ? 0 : UInt32(timeout)
+			timeouts.ReadTotalTimeoutConstant = UInt32(timeout)
+			timeouts.ReadTotalTimeoutMultiplier = 0
+			SetCommTimeouts(handle, &timeouts)
+		
+		#else
+		// Set up the UNIX termios control structure
 		var settings = termios()
 
 		// Get options structure for the port
@@ -218,6 +296,7 @@ public class SerialPort {
 
 		// Commit settings
 		tcsetattr(fileDescriptor, TCSANOW, &settings)
+		#endif // UNIX version
 	}
 	
 	/// Closes the port
@@ -232,7 +311,12 @@ public class SerialPort {
 		readLinesStream = nil
 
 		if let fileDescriptor = fileDescriptor {
-			close(fileDescriptor)
+			#if os(Windows)
+				_close(fileDescriptor) // also closes the handle automatically
+				handle = nil
+			#else
+				close(fileDescriptor)
+			#endif
 		}
 		fileDescriptor = nil
 	}
@@ -328,8 +412,15 @@ extension SerialPort {
 		guard let fileDescriptor = fileDescriptor else {
 			throw PortError.mustBeOpen
 		}
-
-		let bytesWritten = write(fileDescriptor, buffer, size)
+		
+		#if os(Windows)
+			// Windows write() takes UInt32 size and returns Int32
+			let bytesWritten = Int(_write(fileDescriptor, buffer, UInt32(size)))
+		#else
+			// POSIX write() takes Int/size_t and returns Int/ssize_t
+			let bytesWritten = write(fileDescriptor, buffer, size)
+		#endif
+		
 		return bytesWritten
 	}
 	

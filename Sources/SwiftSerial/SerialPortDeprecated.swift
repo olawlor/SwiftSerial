@@ -52,7 +52,14 @@ extension SerialPort {
 			throw PortError.deviceNotConnected
 		}
 
-		let bytesRead = read(fileDescriptor, buffer, size)
+		#if os(Windows)
+			// Windows read() takes UInt32 size and returns Int32
+			let bytesRead = Int(_read(fileDescriptor, buffer, UInt32(size)))
+		#else
+			// POSIX read() takes Int/size_t and returns Int/ssize_t
+			let bytesRead = read(fileDescriptor, buffer, size)
+		#endif
+		
 		return bytesRead
 	}
 

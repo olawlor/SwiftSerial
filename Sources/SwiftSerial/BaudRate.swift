@@ -20,7 +20,7 @@ public enum BaudRate {
 	case baud57600
 	case baud115200
 	case baud230400
-	#if os(Linux)
+	#if os(Linux) || os(Windows)
 	case baud460800
 	case baud500000
 	case baud576000
@@ -74,7 +74,7 @@ public enum BaudRate {
 			self = .baud115200
 		case 230400:
 			self = .baud230400
-		#if os(Linux)
+		#if os(Linux) || os(Windows)
 		case 460800:
 			self = .baud460800
 		case 500000:
@@ -102,7 +102,75 @@ public enum BaudRate {
 			throw PortError.invalidPort
 		}
 	}
-
+	
+	#if os(Windows)
+	//Windows uses numeric int constants (CBR is short for the constants)
+	var speedValue : Int {
+		switch self {
+		case .baud0:
+			return Int(0)
+		case .baud50:
+			return Int(50)
+		case .baud75:
+			return Int(75)
+		case .baud110:
+			return Int(110)
+		case .baud134:
+			return Int(134)
+		case .baud150:
+			return Int(150)
+		case .baud200:
+			return Int(200)
+		case .baud300:
+			return Int(300)
+		case .baud600:
+			return Int(600)
+		case .baud1200:
+			return Int(1200)
+		case .baud1800:
+			return Int(1800)
+		case .baud2400:
+			return Int(2400)
+		case .baud4800:
+			return Int(4800)
+		case .baud9600:
+			return Int(9600)
+		case .baud19200:
+			return Int(19200)
+		case .baud38400:
+			return Int(38400)
+		case .baud57600:
+			return Int(57600)
+		case .baud115200:
+			return Int(115200)
+		case .baud230400:
+			return Int(230400)
+		case .baud460800:
+			return Int(460800)
+		case .baud500000:
+			return Int(500000)
+		case .baud576000:
+			return Int(576000)
+		case .baud921600:
+			return Int(921600)
+		case .baud1000000:
+			return Int(1000000)
+		case .baud1152000:
+			return Int(1152000)
+		case .baud1500000:
+			return Int(1500000)
+		case .baud2000000:
+			return Int(2000000)
+		case .baud2500000:
+			return Int(2500000)
+		case .baud3500000:
+			return Int(3500000)
+		case .baud4000000:
+			return Int(4000000)
+		}
+	}
+	#else
+	// UNIX-derived platforms use the termio.h speed_t constants
 	var speedValue: speed_t {
 		switch self {
 		case .baud0:
@@ -169,4 +237,5 @@ public enum BaudRate {
 		#endif
 		}
 	}
+	#endif
 }
