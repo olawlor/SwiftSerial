@@ -60,7 +60,33 @@ public class SerialPort {
 			// 3. Convert HANDLE to File Descriptor so existing read/write code works
 			// _O_RDWR (2) and _O_BINARY (32768)
 			self.fileDescriptor = _open_osfhandle(Int(bitPattern: h), 0)
-		
+
+			// Windows non-blocking reads don't work with an _open_osfhandle (no FILE_FLAG_OVERLAPPED),
+			//   so we make a dedicated blocking task for this.
+			let stream = AsyncStream<Data> { continuation in
+				Task.detached(priority: .high) {
+					let bufferSize = 1024
+					let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+					defer { buffer.deallocate() }
+
+					while self.isOpen {
+						// This will block until data arrives or timeout occurs
+						let bytesRead = _read(self.fileDescriptor!, buffer, UInt32(bufferSize))
+
+						if bytesRead > 0 {
+							let data = Data(bytes: buffer, count: Int(bytesRead))
+							continuation.yield(data)
+						} else if bytesRead < 0 {
+							// Potential error or port closed
+							break
+						}
+						// Small sleep to prevent 100% CPU usage if read returns 0 immediately
+						try? await Task.sleep(nanoseconds: 1_000_000) // 1ms
+					}
+					continuation.finish()
+				}
+			}
+			self.readDataStream = stream
 		#else
 		// UNIX platform, use open()
 
@@ -85,7 +111,6 @@ public class SerialPort {
 		if fileDescriptor == PortError.failedToOpen.rawValue {
 			throw PortError.failedToOpen
 		}
-		#endif // UNIX version
 
 		guard
 			portMode.receive,
@@ -101,13 +126,7 @@ public class SerialPort {
 				let buffer = UnsafeMutableRawPointer
 					.allocate(byteCount: bufferSize, alignment: 8)
 				
-				#if os(Windows)
-					// Windows read() takes UInt32 size and returns Int32
-					let bytesRead = Int(_read(fileDescriptor, buffer, UInt32(bufferSize)))
-				#else
-					// POSIX read() takes Int/size_t and returns Int/ssize_t
-					let bytesRead = read(fileDescriptor, buffer, bufferSize)
-				#endif
+				let bytesRead = read(fileDescriptor, buffer, bufferSize)
 				
 				guard bytesRead > 0 else { return }
 				let bytes = Data(bytes: buffer, count: bytesRead)
@@ -121,6 +140,7 @@ public class SerialPort {
 		pollSource.resume()
 		self.pollSource = pollSource
 		self.readDataStream = stream
+		#endif // UNIX version
 	}
 	
 	/// Value for the BaudRate of a connection
@@ -193,6 +213,7 @@ public class SerialPort {
 			
 			dcb.fBinary = 1 // Must be 1 on Windows
 			dcb.fParity = (parityType == .none) ? 0 : 1
+			dcb.fDtrControl = 1  // required for hardware like Arduino Uno
 
 			// Flow Control
 			if useHardwareFlowControl {
